@@ -1,59 +1,68 @@
 import socket
 import threading
 import time
+import asyncio
 
 contador_clientes = 0
-lock = threading.Lock()
+clientes_terminados = 0
+banco_cerrado = None
 
-def handle_client(conn, addr):
-    global contador_clientes
+async def handle_client(reader, writer):
+    global contador_clientes, clientes_terminados, banco_cerrado
     
-    print(f"[*] Cliente conectado desde {addr}")
+    addr = writer.get_extra_info('peername')
     
+    # Asignamos el número de cliente rápidamente al llegar
+    contador_clientes += 1
+    mi_numero = contador_clientes
+    print(f"[*] Cliente {mi_numero} conectado desde {addr}")
+
     try:
-        name = conn.recv(1024).decode()
+        # Espera datos del cliente
+        data = await reader.read(1024)
+        name = data.decode()
         
-        # Simulamos la atención del banco con el delay de 5 segundos
         print(f"[-] Atendiendo a {name}... por favor espere.")
-        time.sleep(5) 
         
-        with lock:
-            contador_clientes += 1
-            numero = contador_clientes
+        # --- ATENCIÓN ASÍNCRONA (Aquí va el delay de 5 segundos) ---
+        await asyncio.sleep(5) 
         
-        print(f"[+] Cliente {numero} ({name}) atendido desde {addr}")
+        # Construye la respuesta
+        response = f"Hola {name}, eres el cliente numero {mi_numero}"
+        writer.write(response.encode())
+        await writer.drain()
         
-        response = f"Hola {name}, eres el cliente numero {numero}"
-        conn.sendall(response.encode())
+        print(f"[+] Cliente {mi_numero} ({name}) atendido y respondido.")
         
     except Exception as e:
         print(f"[!] Error con {addr}: {e}")
+        
     finally:
-        conn.close()
-        print(f"[*] Conexion cerrada con {addr}")
+        # Cerrar conexión
+        writer.close()
+        await writer.wait_closed()
+        
+        # Sumamos al terminar de atenderlo, para llevar el control de los 50
+        clientes_terminados += 1
+        
+        # Si ya se atendió al cliente número 50, se levanta la bandera de cierre
+        if clientes_terminados >= 50:
+            print("\n--- EL BANCO HA CERRADO LUEGO DE ATENDER A LOS 50 CLIENTES ---")
+            banco_cerrado.set()
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.bind(("0.0.0.0", 5000))
-server.listen()
- 
-print("Servidor del banco esperando a los 50 clientes...")
-
-# --- MODIFICACIÓN: Límite estricto de 50 conexiones ---
-hilos_activos = []
-
-for i in range(50):
-    conn, addr = server.accept()
+async def main():
+    global banco_cerrado
+    banco_cerrado = asyncio.Event() # Creamos la bandera de evento
     
-    client_thread = threading.Thread(
-        target=handle_client,
-        args=(conn, addr)
+    server = await asyncio.start_server(
+        handle_client, '0.0.0.0', 5000
     )
-    hilos_activos.append(client_thread)
-    client_thread.start()
 
-# Esperamos a que el servidor termine de atender a los 50 antes de cerrarse
-for hilo in hilos_activos:
-    hilo.join()
+    print("Servidor asíncrono del banco esperando a los 50 clientes concurrentes...")
 
-print("\n--- EL BANCO HA CERRADO. Se atendió al límite de 50 clientes. ---")
-server.close()
+    async with server:
+        # El servidor queda en ejecución hasta que el evento del cliente 50 se active
+        await banco_cerrado.wait()
+        
+if __name__ == "__main__":
+    asyncio.run(main())
